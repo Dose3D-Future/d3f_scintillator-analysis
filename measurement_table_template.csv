@@ -1,0 +1,10 @@
+section,role,dataset_id,sample_id,dose_label,current_value,current_unit,geometry,file_path
+direct,blank_reference,direct_blank,empty_holder,none,40,uA,direct,/content/drive/Shareddrives/TN-Dose3D-Future-DAQ/Data/Spectrophotometry/Test_Measurements/blank__whiteLED__direct-0deg__40uA__empty-holder__run01.txt
+direct,dark_qc,direct_dark_qc,dark,LED_off,40,uA,direct,/content/drive/Shareddrives/TN-Dose3D-Future-DAQ/Data/Spectrophotometry/Test_Measurements/dark__whiteLED__direct-0deg__LED-off__run01.txt
+direct,quartz_reference,direct_quartz_reference,quartz,setup_control,40,uA,direct,/content/drive/Shareddrives/TN-Dose3D-Future-DAQ/Data/Spectrophotometry/Test_Measurements/quartz__whiteLED__direct-0deg__40uA__fused-silica__run01.txt
+direct,sample,sample_before_irradiation,scintillator_A,0Gy,40,uA,direct,/content/drive/Shareddrives/TN-Dose3D-Future-DAQ/Data/Spectrophotometry/Test_Measurements/sample__whiteLED__direct-0deg__40uA__scint-A__dose-0Gy__run01.txt
+direct,sample,sample_after_irradiation,scintillator_A,10Gy,40,uA,direct,/content/drive/Shareddrives/TN-Dose3D-Future-DAQ/Data/Spectrophotometry/Test_Measurements/sample__whiteLED__direct-0deg__40uA__scint-A__dose-10Gy__run01.txt
+scattering,scattering_blank,scattering_blank,empty_holder,none,40,mA,90deg,/content/drive/Shareddrives/TN-Dose3D-Future-DAQ/Data/Spectrophotometry/Test_Measurements/blank__whiteLED__scatter-90deg__40mA__empty-holder__run01.txt
+scattering,scattering_dark_qc,scattering_dark_qc,dark,LED_off,40,mA,90deg,/content/drive/Shareddrives/TN-Dose3D-Future-DAQ/Data/Spectrophotometry/Test_Measurements/dark__whiteLED__scatter-90deg__LED-off__run01.txt
+scattering,scattering_quartz,scattering_quartz,quartz,setup_control,40,mA,90deg,/content/drive/Shareddrives/TN-Dose3D-Future-DAQ/Data/Spectrophotometry/Test_Measurements/quartz__whiteLED__scatter-90deg__40mA__fused-silica__run01.txt
+scattering,scattering_sample,scattering_sample_after_irradiation,scintillator_A,10Gy,40,mA,90deg,/content/drive/Shareddrives/TN-Dose3D-Future-DAQ/Data/Spectrophotometry/Test_Measurements/sample__whiteLED__scatter-90deg__40mA__scint-A__dose-10Gy__run01.txt
