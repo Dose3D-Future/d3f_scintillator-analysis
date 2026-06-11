@@ -1,118 +1,165 @@
-# Pipeline spektrofotometryczny — single Colab/Jupyter v5
+# Spectrophotometer GUI pipeline
 
-To jest wersja pipeline’u przygotowana dla użytkowników wykonujących pomiary transmitancji i rozproszenia scyntylatorów przed i po napromienianiu.
+This is a small desktop/batch pipeline for spectrophotometer datasets measured with Air/scintillator/quartz samples in direct transmission and 90-degree scattering geometry.
 
-Wersja v5 doprecyzowuje organizację plików i jest dostarczana jako czysty, nieuruchomiony notebook: GUI ma osobne pola dla każdego pliku, dark spectra są traktowane wyłącznie jako QC, a domyślny katalog danych po podłączeniu Google Drive to:
+## Supported input files
+
+The pipeline supports:
 
 ```text
-/content/drive/Shareddrives/TN-Dose3D-Future-DAQ/Data/Spectrophotometry/Test_Measurements
+*.txt
+*.csv.zip
 ```
 
-Dane przykładowe dołączone do paczki są wyłącznie danymi testowymi pokazującymi format plików. Nie należy ich interpretować jako wyników fizycznych.
-
-## Co użytkownik zmienia w notebooku
-
-Wszystkie ustawienia są w pierwszych komórkach notebooka:
+For ZIP files, the program reads the first spectrum-like member inside the archive, usually the inner `.csv` file. Thorlabs-style CSV exports with metadata are supported, for example:
 
 ```text
-notebooks/spectrophotometer_użytkownik_single_colab_pipeline.ipynb
+#IntegrationTime;4000.000000
+#Date;20260609
+#Time;14412019
+[Data]
+1.940950928e+02;2.347147558e-03
+...
+[EndOfFile]
 ```
 
-Nie trzeba edytować żadnego pliku JSON. Użytkownik ustawia w GUI:
-
-- `Data/root dir` — katalog z plikami TXT, zwykle katalog na Google Drive podany wyżej,
-- `Output dir` — katalog, gdzie notebook zapisze CSV, figury i raport,
-- `Direct blank` — powietrze / pusty holder w geometrii transmisji bezpośredniej,
-- `Direct dark QC` — dark w geometrii bezpośredniej, tylko do kontroli jakości,
-- `Direct quartz` — opcjonalne szkło kwarcowe / fused silica do kontroli stabilności setupu,
-- `Direct samples` — tabela próbek scyntylatorów w transmisji bezpośredniej,
-- `Scattering blank` — pusty holder / tło dla geometrii 90°,
-- `Scattering dark QC` — dark dla geometrii 90°, tylko do kontroli jakości,
-- `Scattering quartz` — kwarcowa próbka kontrolna dla rozproszenia,
-- `Scattering samples` — tabela próbek scyntylatorów mierzonych w geometrii rozproszeniowej.
-
-## Proponowane nazwy plików
-
-Zalecany schemat:
+When `IntegrationTime` is present, the signal used for all processing is:
 
 ```text
-role__source__geometry__condition__sample-or-run.txt
+signal_normalized(lambda) = signal_raw(lambda) / IntegrationTime
 ```
 
-Czyli np.:
+This normalization is applied before baseline correction, noise gating, transmittance ratios, absorbance and scattering integrals. It is enabled by default. Plain TXT files without metadata are still supported; then the normalization factor is `1.0`.
+
+## Filename convention
+
+Use filenames like:
 
 ```text
-blank__whiteLED__direct-0deg__40uA__empty-holder__run01.txt
-sample__whiteLED__direct-0deg__40uA__scint-A__dose-0Gy__run01.txt
-sample__whiteLED__direct-0deg__40uA__scint-A__dose-10Gy__run01.txt
-sample__LED472nm__direct-0deg__40uA__scint-A__dose-0Gy__run01.txt
-dark__whiteLED__direct-0deg__LED-off__run01.txt
-dark__whiteLED__scatter-90deg__LED-off__run01.txt
-quartz__whiteLED__direct-0deg__40uA__fused-silica__run01.txt
-quartz__whiteLED__scatter-90deg__40mA__fused-silica__run01.txt
+BX_001_UV_Air_0deg.csv.zip
+BX_001_White_Air_0deg.csv.zip
+BX_001_UV_RPMS470_0deg_TENT.csv.zip
+BX_001_White_RPMS470_0deg_TENT.csv.zip
+BX_001_UV_RPMS470_90deg_TENT.csv.zip
+BX_001_White_RPMS470_90deg_TENT.csv.zip
 ```
 
-Dla dwóch dosłanych darków proponuję zmianę nazw:
+General form:
 
 ```text
-air_attenuation_white_dark.txt
-→ dark__whiteLED__direct-0deg__LED-off__run01.txt
-
-air_scattering_white_dark_90deg.txt
-→ dark__whiteLED__scatter-90deg__LED-off__run01.txt
+BX_XXX_<Diode>_<Sample>_<Geometry>_<Config>.<ext>
 ```
 
-`whiteLED` oznacza białą diodę / białe źródło. Dla pomiarów z diodą 472 nm używamy analogicznie `LED472nm`.
+Where:
 
-## Najważniejsza zasada porównań
+- `BX_XXX` is the scintillator/sample series ID. Placeholder-style names such as `BX_XXX` are accepted for draft/testing data.
+- `Diode` is usually `UV` or `White`.
+- `Sample` is `Air`, `RPMS470`, `Quartz`, etc.
+- `Geometry` is `0deg` for direct transmittance or `90deg` for scattering.
+- `Config` is the cube orientation/setup label, e.g. `TENT`, `FLAT`, `SIDE_A`, `TSWS`.
 
-Transmitancja i absorbancja są liczone tylko dla tego samego prądu diody, tej samej geometrii i tej samej konfiguracji pomiarowej:
+For `Air` references, `Config` is optional and usually omitted. The same Air reference is reused for every sample orientation with the same `BX_XXX + Diode + Geometry`. For example, `BX_001_White_Air_0deg.csv.zip` is used as the blank for both `BX_001_White_RPMS470_0deg_TENT.csv.zip` and `BX_001_White_RPMS470_0deg_SIDE_A.csv.zip`.
+
+Unknown non-Air/non-Quartz samples are treated as scintillators.
+
+## Installation
+
+From the project folder:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+Or without editable install:
+
+```bash
+pip install -r requirements.txt
+```
+
+## GUI usage
+
+From the folder containing this README:
+
+```bash
+python -m spectro_app
+```
+
+or after installation:
+
+```bash
+spectro-gui
+```
+
+Choose the input folder, choose or accept the output folder, scan files, then run analysis.
+
+The GUI has a checkbox `Normalize by IntegrationTime`. Leave it enabled for mixed integration times. Disable it only when you intentionally want to reproduce raw-count behaviour.
+
+## CLI usage
+
+```bash
+python -m spectro_app.cli /path/to/raw_data /path/to/output
+```
+
+Common options:
+
+```bash
+python -m spectro_app.cli /path/to/raw_data \
+  --analysis-window 400,750 \
+  --baseline-ranges '190,350;850,1020' \
+  --smooth-window 41
+```
+
+By default, plots are split per sample and sample orientation. This avoids accidental overplotting when the folder contains several orientations or quartz/scintillator controls. Air references are matched without using orientation/config, because the blank path has no cube orientation.
+
+To overlay all samples sharing the same series, diode, geometry and config:
+
+```bash
+python -m spectro_app.cli /path/to/raw_data --overlay-samples
+```
+
+To disable IntegrationTime normalization:
+
+```bash
+python -m spectro_app.cli /path/to/raw_data --no-integration-normalization
+```
+
+## Outputs
+
+The pipeline writes:
 
 ```text
-T(lambda) = I_sample(lambda) / I_blank(lambda)
+analysis_outputs/
+  pdf/
+    *_transmittance.pdf
+    *_absorbance.pdf
+    *_scattering.pdf
+  vega/
+    *_transmittance.json
+    *_absorbance.json
+    *_scattering.json
+  processed/
+    detected_files.csv
+    analysis_ready_curves.csv
+    analysis_integrals.csv
+  warnings.txt
+  run_report.md
+```
+
+The Vega-Lite JSON files can be opened in the Vega Editor and edited further.
+
+`analysis_ready_curves.csv` includes the columns `integration_time`, `blank_integration_time`, `integration_time_norm_factor`, `signal_raw`, `signal_normalized`, `signal_net` and `signal_gated`. If raw curves are not exported, those signal columns are populated only where they are directly relevant to the curve type.
+
+## Processing model
+
+Direct transmittance is calculated after integration-time normalization, residual baseline subtraction and noise gating:
+
+```text
+T(lambda) = I_sample_normalized(lambda) / I_air_blank_normalized(lambda)
 A(lambda) = -log10(T(lambda))
 ```
 
-`blank` oznacza powietrze / pusty holder. Próbka kwarcowa nie jest blankiem. Kwarc służy do kontroli, czy setup jest stabilny między seriami pomiarowymi.
+Before the ratio, spectra are residual-baseline-subtracted and noise-gated. This prevents meaningless ratio spikes where the Air blank signal is effectively only noise.
 
-Jeżeli próbka była mierzona przy innym prądzie diody niż blank, pipeline nie liczy dla niej transmitancji absolutnej. Taki pomiar trafia do analizy jako diagnostyczny kształt widma.
-
-## Dark spectra
-
-Zakładamy, że dane eksportowane ze spektrometru są już dark-corrected. Dlatego pipeline nie odejmuje darków.
-
-Dark measurement jest mimo to bardzo ważny jako kontrola jakości. Jeżeli dark jest istotnie powyżej zera albo ma wyraźny kształt widmowy, może to oznaczać przeciekanie światła, źle zamknięty setup, stray light albo problem z akwizycją.
-
-W v5 darki są domyślnie wyświetlane na osobnym wykresie `Dark QC spectra - display only, not subtracted`.
-
-## Baseline i odcinanie szumu
-
-Pipeline ma trzy główne parametry odcinania szumu:
-
-- `Baseline ranges` — zakresy długości fali, gdzie oczekujemy braku użytecznego sygnału. Z nich liczony jest resztkowy offset i szum.
-- `Blank min frac` — minimalny poziom blanku jako ułamek maksimum blanku. Tam, gdzie blank jest mniejszy, nie wolno liczyć `sample / blank`.
-- `Signal floor frac` — minimalny poziom sygnału jako ułamek maksimum danego widma. Wartości poniżej tego progu są zerowane w widmach używanych do całek i diagnostyki.
-- `Noise sigma x` — dodatkowy próg oparty na szumie w obszarze baseline. Efektywny próg to większa z wartości: próg procentowy albo `Noise sigma x * sigma_noise`.
-
-Dzięki temu długie ogony widma, gdzie realnie jest tylko szum, nie psują transmitancji, absorbancji i całek.
-
-## Główne wyniki
-
-Pipeline zapisuje:
-
-- `results/processed/analysis_ready_dataframe.csv` — główny dataframe do dalszej analizy,
-- `results/processed/raw_spectra_long.csv` — wszystkie widma z metadanymi i sygnałami po bramkowaniu,
-- `results/tables/qc_summary.csv` — kontrola jakości i progi szumu,
-- `results/tables/integral_summary.csv` — całki pod krzywymi,
-- `results/figures/` — wykresy diagnostyczne.
-
-## Co porównywać w badaniach dawki
-
-Dla wpływu promieniowania na scyntylatory najważniejsze będą:
-
-- zmiana `T(lambda)` względem dawki,
-- zmiana `A(lambda)` względem dawki,
-- całka z `1 - T`,
-- całka z absorbancji,
-- zmiana kształtu i całki rozproszenia 90°,
-- stabilność krzywej kwarcu między seriami.
+For 90-degree scattering, the pipeline currently computes a net gated signal and a normalised shape curve. Air blank for scattering is optional. If no 90-degree Air blank is present, the sample gated signal is used directly for shape diagnostics.
