@@ -147,7 +147,7 @@ analysis_outputs/
   run_report.md
 ```
 
-The Vega-Lite JSON files can be opened in the Vega Editor and edited further.
+The Vega-Lite JSON files can be opened in the [Vega Editor](https://vega.github.io/editor/) and edited further.
 
 `analysis_ready_curves.csv` includes the columns `integration_time`, `blank_integration_time`, `integration_time_norm_factor`, `signal_raw`, `signal_normalized`, `signal_net` and `signal_gated`. If raw curves are not exported, those signal columns are populated only where they are directly relevant to the curve type.
 
