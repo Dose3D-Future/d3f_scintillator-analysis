@@ -44,7 +44,7 @@ jobs:
       - name: Verify package installs
         run: |
           python -m pip install dist/*.whl
-          python -c "import spectro_gui_pipeline"
+          python -c "import spectro_app"
 
       - name: Create GitHub Release and upload assets
         uses: softprops/action-gh-release@v2
