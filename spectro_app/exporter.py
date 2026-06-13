@@ -221,7 +221,9 @@ def _plot_single_pdf(
     ax.grid(alpha=0.22)
     ax.legend(fontsize=7, loc="best")
     fig.tight_layout()
-    fig.savefig(out_path, dpi=180)
+    fig.savefig(out_path, bbox_inches="tight", dpi=300)
+    fig.savefig(out_path.with_suffix(".png"), bbox_inches="tight", dpi=300)
+
     plt.close(fig)
 
 

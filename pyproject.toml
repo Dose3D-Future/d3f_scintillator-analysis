@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spectro-gui-pipeline"
-version = "0.1.2"
+version = "0.1.3"
 description = "GUI and batch pipeline for spectrophotometer transmittance/scattering analysis"
 requires-python = ">=3.10"
 dependencies = [
