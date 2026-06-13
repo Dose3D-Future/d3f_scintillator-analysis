@@ -21,8 +21,11 @@ from typing import Optional
 
 import numpy as np
 
-from .processor import GroupResult, ProcessingConfig, ScatteringResult, TransmittanceResult
-
+if __package__:
+    from .processor import GroupResult, ProcessingConfig, ScatteringResult, TransmittanceResult
+else:
+    from processor import GroupResult, ProcessingConfig, ScatteringResult, TransmittanceResult
+    
 _PALETTE = [
     "#2166ac", "#d6604d", "#4dac26", "#b2abd2",
     "#f4a582", "#92c5de", "#e08214", "#543005",

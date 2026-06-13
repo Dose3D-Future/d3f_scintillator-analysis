@@ -34,7 +34,11 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     _SCIPY_OK = False
 
-from .file_parser import ParsedFile
+
+if __package__:
+    from .file_parser import ParsedFile
+else:
+    from file_parser import ParsedFile
 
 
 @dataclass

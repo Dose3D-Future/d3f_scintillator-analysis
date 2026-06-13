@@ -9,9 +9,14 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from .exporter import export_all
-from .file_parser import ParsedFile, group_by_plot, scan_folder, validate_dataset, validate_group
-from .processor import GroupResult, ProcessingConfig, process_group
+if __package__:
+    from .exporter import export_all
+    from .file_parser import ParsedFile, group_by_plot, scan_folder, validate_dataset, validate_group
+    from .processor import GroupResult, ProcessingConfig, process_group
+else:
+    from exporter import export_all
+    from file_parser import ParsedFile, group_by_plot, scan_folder, validate_dataset, validate_group
+    from processor import GroupResult, ProcessingConfig, process_group
 
 
 @dataclass

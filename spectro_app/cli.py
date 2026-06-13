@@ -5,8 +5,12 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .pipeline import parse_pair, parse_ranges, run_pipeline
-from .processor import ProcessingConfig
+if __package__:
+    from .pipeline import parse_pair, parse_ranges, run_pipeline
+    from .processor import ProcessingConfig
+else:
+    from pipeline import parse_pair, parse_ranges, run_pipeline
+    from processor import ProcessingConfig
 
 
 

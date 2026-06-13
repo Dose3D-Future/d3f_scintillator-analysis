@@ -8,9 +8,14 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from .file_parser import scan_folder, validate_dataset
-from .pipeline import parse_pair, parse_ranges, run_pipeline
-from .processor import ProcessingConfig
+if __package__:
+    from .file_parser import scan_folder, validate_dataset
+    from .pipeline import parse_pair, parse_ranges, run_pipeline
+    from .processor import ProcessingConfig
+else:
+    from file_parser import scan_folder, validate_dataset
+    from pipeline import parse_pair, parse_ranges, run_pipeline
+    from processor import ProcessingConfig
 
 
 class SpectroApp(tk.Tk):
