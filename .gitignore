@@ -218,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+example_data/csv_zip_raw/analysis_outputs*/
