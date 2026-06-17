@@ -107,6 +107,7 @@ Common options:
 ```bash
 python -m spectro_app.cli /path/to/raw_data \
   --analysis-window 400,750 \
+  --interest-window 470,570 \
   --baseline-ranges '190,350;850,1020' \
   --smooth-window 41
 ```
@@ -132,6 +133,7 @@ The pipeline writes:
 ```text
 analysis_outputs/
   pdf/
+    final_report.pdf
     *_transmittance.pdf
     *_absorbance.pdf
     *_scattering.pdf
@@ -150,6 +152,8 @@ analysis_outputs/
 The Vega-Lite JSON files can be opened in the [Vega Editor](https://vega.github.io/editor/) and edited further.
 
 `analysis_ready_curves.csv` includes the columns `integration_time`, `blank_integration_time`, `integration_time_norm_factor`, `signal_raw`, `signal_normalized`, `signal_net` and `signal_gated`. If raw curves are not exported, those signal columns are populated only where they are directly relevant to the curve type.
+
+`pdf/final_report.pdf` collects the generated plot pages into one PDF and starts with a table of observables from the interest window. For transmittance and absorbance it reports the ROI integral and the angle, in degrees, between the X axis and a straight-line fit to the smoothed curve inside that ROI. The same ROI is highlighted on transmittance and absorbance plots.
 
 ## Processing model
 

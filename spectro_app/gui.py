@@ -28,6 +28,7 @@ class SpectroApp(tk.Tk):
         self.input_var = tk.StringVar()
         self.output_var = tk.StringVar()
         self.analysis_window_var = tk.StringVar(value="400,750")
+        self.interest_window_var = tk.StringVar(value="470,570")
         self.baseline_ranges_var = tk.StringVar(value="190,350;850,1020")
         self.smooth_window_var = tk.StringVar(value="41")
         self.smooth_poly_var = tk.StringVar(value="3")
@@ -62,12 +63,14 @@ class SpectroApp(tk.Tk):
 
         ttk.Label(cfg, text="Analysis window [nm]").grid(row=0, column=0, sticky="w")
         ttk.Entry(cfg, width=14, textvariable=self.analysis_window_var).grid(row=0, column=1, sticky="w")
-        ttk.Label(cfg, text="Baseline ranges [nm]").grid(row=0, column=2, sticky="w", padx=(20, 0))
-        ttk.Entry(cfg, width=24, textvariable=self.baseline_ranges_var).grid(row=0, column=3, sticky="w")
-        ttk.Label(cfg, text="Smoothing window").grid(row=0, column=4, sticky="w", padx=(20, 0))
-        ttk.Entry(cfg, width=8, textvariable=self.smooth_window_var).grid(row=0, column=5, sticky="w")
-        ttk.Label(cfg, text="Polyorder").grid(row=0, column=6, sticky="w", padx=(20, 0))
-        ttk.Entry(cfg, width=8, textvariable=self.smooth_poly_var).grid(row=0, column=7, sticky="w")
+        ttk.Label(cfg, text="Interest window [nm]").grid(row=0, column=2, sticky="w", padx=(20, 0))
+        ttk.Entry(cfg, width=14, textvariable=self.interest_window_var).grid(row=0, column=3, sticky="w")
+        ttk.Label(cfg, text="Baseline ranges [nm]").grid(row=0, column=4, sticky="w", padx=(20, 0))
+        ttk.Entry(cfg, width=24, textvariable=self.baseline_ranges_var).grid(row=0, column=5, sticky="w")
+        ttk.Label(cfg, text="Smoothing window").grid(row=1, column=0, sticky="w")
+        ttk.Entry(cfg, width=8, textvariable=self.smooth_window_var).grid(row=1, column=1, sticky="w")
+        ttk.Label(cfg, text="Polyorder").grid(row=1, column=2, sticky="w", padx=(20, 0))
+        ttk.Entry(cfg, width=8, textvariable=self.smooth_poly_var).grid(row=1, column=3, sticky="w")
 
         opts = ttk.Frame(self)
         opts.pack(fill=tk.X, **pad)
@@ -142,6 +145,7 @@ class SpectroApp(tk.Tk):
             raise ValueError("Smoothing window and polyorder must be integers") from exc
         return ProcessingConfig(
             analysis_window_nm=parse_pair(self.analysis_window_var.get(), default.analysis_window_nm),
+            interest_window_nm=parse_pair(self.interest_window_var.get(), default.interest_window_nm),
             baseline_ranges_nm=parse_ranges(self.baseline_ranges_var.get(), default.baseline_ranges_nm),
             smoothing_window_points=smooth_window,
             smoothing_polyorder=smooth_poly,

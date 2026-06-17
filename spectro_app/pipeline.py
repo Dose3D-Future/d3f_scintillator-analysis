@@ -214,8 +214,20 @@ def curves_dataframe(results: list[GroupResult], include_raw: bool = False) -> p
 def _quantity_unit(quantity: str) -> str:
     if quantity.endswith("integration_time"):
         return "IntegrationTime metadata units"
+    if quantity.endswith("_angle_deg"):
+        return "deg"
+    if quantity.endswith("_slope"):
+        return "1/nm"
+    if quantity.endswith("_intercept"):
+        return "curve units"
+    if quantity.endswith("_points"):
+        return "count"
     if quantity == "fractional_loss_auc":
         return "fraction*nm"
+    if quantity.startswith("interest_transmittance") and quantity.endswith("_auc"):
+        return "T*nm"
+    if quantity.startswith("interest_absorbance") and quantity.endswith("_auc"):
+        return "A*nm"
     if quantity == "scattering_net_auc":
         return "normalised_signal*nm"
     if quantity == "scattering_shape_auc":
@@ -273,6 +285,7 @@ def integrals_dataframe(results: list[GroupResult]) -> pd.DataFrame:
 def _config_dict(cfg: ProcessingConfig) -> dict:
     d = asdict(cfg)
     d["analysis_window_nm"] = list(cfg.analysis_window_nm)
+    d["interest_window_nm"] = list(cfg.interest_window_nm)
     d["baseline_ranges_nm"] = [list(x) for x in cfg.baseline_ranges_nm]
     return d
 

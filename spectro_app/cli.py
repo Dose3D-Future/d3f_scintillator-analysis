@@ -19,6 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("input_dir", type=Path, help="Folder containing spectrum files")
     p.add_argument("output_dir", type=Path, nargs="?", help="Output folder; default: input_dir/analysis_outputs")
     p.add_argument("--analysis-window", default="400,750", help="Analysis window in nm, e.g. 400,750")
+    p.add_argument("--interest-window", default="470,570", help="ROI used for final-report AUC and linear-fit angle, e.g. 470,570")
     p.add_argument("--baseline-ranges", default="190,350;850,1020", help="Baseline ranges, e.g. 190,350;850,1020")
     p.add_argument("--smooth-window", type=int, default=41)
     p.add_argument("--smooth-polyorder", type=int, default=3)
@@ -37,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     default_cfg = ProcessingConfig()
     cfg = ProcessingConfig(
         analysis_window_nm=parse_pair(args.analysis_window, default_cfg.analysis_window_nm),
+        interest_window_nm=parse_pair(args.interest_window, default_cfg.interest_window_nm),
         baseline_ranges_nm=parse_ranges(args.baseline_ranges, default_cfg.baseline_ranges_nm),
         smoothing_window_points=args.smooth_window,
         smoothing_polyorder=args.smooth_polyorder,

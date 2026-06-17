@@ -44,6 +44,7 @@ else:
 @dataclass
 class ProcessingConfig:
     analysis_window_nm: tuple[float, float] = (400.0, 750.0)
+    interest_window_nm: tuple[float, float] = (470.0, 570.0)
     baseline_ranges_nm: list[tuple[float, float]] = field(
         default_factory=lambda: [(190.0, 350.0), (850.0, 1020.0)]
     )
@@ -291,6 +292,29 @@ def _integrate(wl: np.ndarray, values: np.ndarray, mask: np.ndarray) -> float:
     return float(np.trapz(v_m, wl_m))
 
 
+def _linear_fit_observables(wl: np.ndarray, values: np.ndarray, mask: np.ndarray) -> dict[str, float]:
+    finite = mask & np.isfinite(wl) & np.isfinite(values)
+    if finite.sum() < 2:
+        return {
+            "auc": float("nan"),
+            "slope": float("nan"),
+            "intercept": float("nan"),
+            "angle_deg": float("nan"),
+            "n_points": float(finite.sum()),
+        }
+
+    x = wl[finite]
+    y = values[finite]
+    slope, intercept = np.polyfit(x, y, 1)
+    return {
+        "auc": _integrate(wl, values, finite),
+        "slope": float(slope),
+        "intercept": float(intercept),
+        "angle_deg": float(np.degrees(np.arctan(slope))),
+        "n_points": float(finite.sum()),
+    }
+
+
 @dataclass
 class SpectrumResult:
     parsed: ParsedFile
@@ -420,6 +444,7 @@ def process_group(
             result.warnings.append(f"Could not load {pf.path.name}: {exc}")
 
     analysis_lo, analysis_hi = cfg.analysis_window_nm
+    interest_lo, interest_hi = cfg.interest_window_nm
 
     if representative.measurement_type == "transmittance":
         blank_sr = next((sr for sr in result.raw_spectra if sr.parsed.role == "blank_air"), None)
@@ -449,10 +474,23 @@ def process_group(
             A_smooth = _smooth(A, cfg.smoothing_window_points, cfg.smoothing_polyorder)
 
             trusted = valid_ratio & np.isfinite(T)
+            interest_mask = trusted & (blank_wl >= interest_lo) & (blank_wl <= interest_hi)
+            t_interest = _linear_fit_observables(blank_wl, T_smooth, interest_mask)
+            a_interest = _linear_fit_observables(blank_wl, A_smooth, interest_mask)
             integrals = {
                 "transmittance_auc": _integrate(blank_wl, T, trusted),
                 "absorbance_auc": _integrate(blank_wl, A, trusted),
                 "fractional_loss_auc": _integrate(blank_wl, 1.0 - T, trusted),
+                "interest_transmittance_auc": t_interest["auc"],
+                "interest_transmittance_fit_slope": t_interest["slope"],
+                "interest_transmittance_fit_intercept": t_interest["intercept"],
+                "interest_transmittance_fit_angle_deg": t_interest["angle_deg"],
+                "interest_transmittance_fit_points": t_interest["n_points"],
+                "interest_absorbance_auc": a_interest["auc"],
+                "interest_absorbance_fit_slope": a_interest["slope"],
+                "interest_absorbance_fit_intercept": a_interest["intercept"],
+                "interest_absorbance_fit_angle_deg": a_interest["angle_deg"],
+                "interest_absorbance_fit_points": a_interest["n_points"],
                 "sample_integration_time": float(sr.integration_time) if sr.integration_time is not None else float("nan"),
                 "blank_integration_time": float(blank_sr.integration_time) if blank_sr.integration_time is not None else float("nan"),
             }
