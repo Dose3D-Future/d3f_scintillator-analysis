@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import csv
 from pathlib import Path
 from typing import Optional
 
@@ -248,17 +249,50 @@ def _draw_plot(
     if hline is not None:
         ax.axhline(hline, linestyle="--", linewidth=0.9, color="grey")
 
+    fit_equations: list[str] = []
     for i, (wl, values, label) in enumerate(series):
         ax.plot(wl, values, color=_color(i), linewidth=1.8, label=label)
         if fit_overlays and i < len(fit_overlays) and interest_region is not None:
             slope, intercept, fit_label = fit_overlays[i]
             if np.isfinite(slope) and np.isfinite(intercept):
-                x_fit = np.array([interest_region[0], interest_region[1]], dtype=float)
+                x_fit = _extended_fit_range(interest_region, wl)
                 y_fit = slope * x_fit + intercept
                 ax.plot(x_fit, y_fit, color=_color(i), linewidth=1.4, linestyle=":", label=f"{fit_label} fit")
+                fit_equations.append(f"{fit_label}: {_linear_equation_text(slope, intercept)}")
 
     ax.grid(alpha=0.22)
     ax.legend(fontsize=7, loc="best")
+    if fit_equations:
+        ax.text(
+            0.015,
+            0.985,
+            "\n".join(fit_equations),
+            transform=ax.transAxes,
+            va="top",
+            ha="left",
+            fontsize=7,
+            bbox={"boxstyle": "round,pad=0.35", "facecolor": "white", "edgecolor": "#bbbbbb", "alpha": 0.82},
+        )
+
+
+def _extended_fit_range(interest_region: tuple[float, float], wl: np.ndarray) -> np.ndarray:
+    lo, hi = interest_region
+    width = hi - lo
+    if not np.isfinite(width) or width <= 0:
+        return np.array([lo, hi], dtype=float)
+
+    x_lo = lo - 0.5 * width
+    x_hi = hi + 0.5 * width
+    finite_wl = wl[np.isfinite(wl)]
+    if finite_wl.size:
+        x_lo = max(x_lo, float(np.nanmin(finite_wl)))
+        x_hi = min(x_hi, float(np.nanmax(finite_wl)))
+    return np.array([x_lo, x_hi], dtype=float)
+
+
+def _linear_equation_text(slope: float, intercept: float) -> str:
+    sign = "+" if intercept >= 0 else "-"
+    return f"y = {_fmt_float(slope, 4)}x {sign} {_fmt_float(abs(intercept), 4)}"
 
 
 def _valid_region_from_tr(tr: TransmittanceResult) -> Optional[tuple[float, float]]:
@@ -412,6 +446,21 @@ def _fmt_float(value: float, digits: int = 5) -> str:
     return f"{value:.{digits}g}"
 
 
+def _observable_columns() -> list[str]:
+    return [
+        "Group",
+        "Sample",
+        "T ROI AUC",
+        "T fit angle [deg]",
+        "T fit a",
+        "T fit b",
+        "A ROI AUC",
+        "A fit angle [deg]",
+        "A fit a",
+        "A fit b",
+    ]
+
+
 def _observable_rows(results: list[GroupResult]) -> list[list[str]]:
     rows: list[list[str]] = []
     for result in results:
@@ -422,10 +471,23 @@ def _observable_rows(results: list[GroupResult]) -> list[list[str]]:
                 label,
                 _fmt_float(tr.integrals.get("interest_transmittance_auc", float("nan"))),
                 _fmt_float(tr.integrals.get("interest_transmittance_fit_angle_deg", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_transmittance_fit_slope", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_transmittance_fit_intercept", float("nan"))),
                 _fmt_float(tr.integrals.get("interest_absorbance_auc", float("nan"))),
                 _fmt_float(tr.integrals.get("interest_absorbance_fit_angle_deg", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_absorbance_fit_slope", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_absorbance_fit_intercept", float("nan"))),
             ])
     return rows
+
+
+def _write_observable_rows_csv(results: list[GroupResult], out_dir: Path) -> Path:
+    out_path = out_dir / "final_report_observables.csv"
+    with out_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(_observable_columns())
+        writer.writerows(_observable_rows(results))
+    return out_path
 
 
 def _report_text_page(pdf, title: str, lines: list[str]) -> None:
@@ -450,7 +512,7 @@ def _report_table_pages(pdf, rows: list[list[str]]) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    columns = ["Group", "Sample", "T ROI AUC", "T fit angle [deg]", "A ROI AUC", "A fit angle [deg]"]
+    columns = _observable_columns()
     if not rows:
         _report_text_page(pdf, "ROI observables", ["No transmittance/absorbance observables were calculated."])
         return
@@ -461,10 +523,10 @@ def _report_table_pages(pdf, rows: list[list[str]]) -> None:
         fig, ax = plt.subplots(figsize=(11.69, 8.27))
         ax.axis("off")
         ax.set_title("ROI observables", fontsize=16, weight="bold", pad=18)
-        col_widths = [0.29, 0.29, 0.13, 0.13, 0.13, 0.13]
+        col_widths = [0.19, 0.19, 0.09, 0.09, 0.07, 0.08, 0.09, 0.09, 0.07, 0.08]
         table = ax.table(cellText=chunk, colLabels=columns, loc="center", cellLoc="left", colLoc="left",colWidths=col_widths)
         table.auto_set_font_size(False)
-        table.set_fontsize(7)
+        table.set_fontsize(6)
         table.scale(1, 1.35)
         for (row, _col), cell in table.get_celld().items():
             if row == 0:
@@ -598,6 +660,7 @@ def export_all(
     all_written: list[Path] = []
     for r in results:
         all_written.extend(export_group(r, out_dir, config, export_vega=export_vega, export_pdf=export_pdf))
+    all_written.append(_write_observable_rows_csv(results, Path(out_dir)))
     if export_pdf:
         all_written.append(_write_final_report_pdf(results, Path(out_dir), config))
     return all_written
