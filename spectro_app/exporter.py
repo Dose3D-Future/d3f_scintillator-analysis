@@ -17,15 +17,18 @@ from __future__ import annotations
 import json
 import re
 import csv
+import zipfile
+from collections import defaultdict
+from html import escape
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
 if __package__:
-    from .processor import GroupResult, ProcessingConfig, ScatteringResult, TransmittanceResult
+    from .processor import GroupResult, ProcessingConfig, QuantumConversionResult, ScatteringResult, TransmittanceResult
 else:
-    from processor import GroupResult, ProcessingConfig, ScatteringResult, TransmittanceResult
+    from processor import GroupResult, ProcessingConfig, QuantumConversionResult, ScatteringResult, TransmittanceResult
     
 _PALETTE = [
     "#2166ac", "#d6604d", "#4dac26", "#b2abd2",
@@ -131,6 +134,110 @@ def _scattering_rows(sc_list: list[ScatteringResult]) -> list[dict]:
     return all_rows
 
 
+def _quantum_conversion_rows(qc_list: list[QuantumConversionResult]) -> list[dict]:
+    all_rows: list[dict] = []
+    for qc in qc_list:
+        incoming_label = f"Incoming UV ({qc.blank.parsed.sample}, {qc.blank.parsed.geometry})"
+        emitted_label = f"Emitted - {qc.sample.parsed.display_label}"
+        for w, incoming, emitted in zip(qc.wl, qc.incoming_energy_signal, qc.emitted_energy_signal):
+            all_rows.append({
+                "wl": float(w),
+                "E": float(incoming) if np.isfinite(incoming) else None,
+                "series": incoming_label,
+            })
+            all_rows.append({
+                "wl": float(w),
+                "E": float(emitted) if np.isfinite(emitted) else None,
+                "series": emitted_label,
+            })
+    return all_rows
+
+
+def _scale_to_unit_peak(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    finite = np.isfinite(values)
+    if not finite.any():
+        return np.full_like(values, np.nan, dtype=float)
+    peak = float(np.nanmax(np.abs(values[finite])))
+    if peak <= 0 or not np.isfinite(peak):
+        return np.full_like(values, np.nan, dtype=float)
+    return values / peak
+
+
+def _plot_smooth(values: np.ndarray, window: int = 41) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    finite = np.isfinite(values)
+    if finite.sum() < 5:
+        return values.copy()
+    n = values.size
+    w = min(int(window), n if n % 2 == 1 else n - 1)
+    if w < 5:
+        return values.copy()
+    if w % 2 == 0:
+        w -= 1
+    x = np.arange(n)
+    filled = np.interp(x, x[finite], values[finite])
+    kernel = np.ones(w, dtype=float) / float(w)
+    smoothed = np.convolve(filled, kernel, mode="same")
+    smoothed[~finite] = np.nan
+    return smoothed
+
+
+def _quantum_conversion_scaled_rows(qc_list: list[QuantumConversionResult]) -> list[dict]:
+    all_rows: list[dict] = []
+    for qc in qc_list:
+        incoming_label = f"Incoming UV scaled ({qc.blank.parsed.sample}, {qc.blank.parsed.geometry})"
+        emitted_label = f"Emitted scaled - {qc.sample.parsed.display_label}"
+        incoming_scaled = _scale_to_unit_peak(qc.incoming_energy_signal)
+        emitted_scaled = _scale_to_unit_peak(qc.emitted_energy_signal)
+        for w, incoming, emitted in zip(qc.wl, incoming_scaled, emitted_scaled):
+            all_rows.append({
+                "wl": float(w),
+                "E_scaled": float(incoming) if np.isfinite(incoming) else None,
+                "series": incoming_label,
+            })
+            all_rows.append({
+                "wl": float(w),
+                "E_scaled": float(emitted) if np.isfinite(emitted) else None,
+                "series": emitted_label,
+            })
+    return all_rows
+
+
+def _unique_raw_spectra(results: list[GroupResult]) -> list:
+    seen: set[str] = set()
+    spectra = []
+    for result in results:
+        for sr in result.raw_spectra:
+            key = str(sr.parsed.path)
+            if key in seen:
+                continue
+            seen.add(key)
+            spectra.append(sr)
+    spectra.sort(key=lambda sr: (sr.parsed.series_id, sr.parsed.diode, sr.parsed.geometry, sr.parsed.sample, sr.parsed.config, sr.parsed.path.name))
+    return spectra
+
+
+def _all_raw_measurement_rows(results: list[GroupResult]) -> list[dict]:
+    all_rows: list[dict] = []
+    for sr in _unique_raw_spectra(results):
+        smooth = _plot_smooth(sr.signal_normalized)
+        raw_label = f"{sr.parsed.display_label} raw"
+        smooth_label = f"{sr.parsed.display_label} smooth"
+        for w, raw, smoothed in zip(sr.wl, sr.signal_normalized, smooth):
+            all_rows.append({
+                "wl": float(w),
+                "I": float(raw) if np.isfinite(raw) else None,
+                "series": raw_label,
+            })
+            all_rows.append({
+                "wl": float(w),
+                "I": float(smoothed) if np.isfinite(smoothed) else None,
+                "series": smooth_label,
+            })
+    return all_rows
+
+
 def _raw_comparison_rows(tr_list: list[TransmittanceResult]) -> list[dict]:
     all_rows: list[dict] = []
     seen_blank_labels: set[str] = set()
@@ -189,6 +296,28 @@ def _raw_comparison_spec(tr_list: list[TransmittanceResult], group_key: str) -> 
 def _scattering_spec(sc_list: list[ScatteringResult], group_key: str) -> dict:
     spec = _base_spec(f"Scattering shape 90deg - {group_key}", "Wavelength (nm)", "Normalised scattering intensity")
     spec["layer"].append(_series_layer(_scattering_rows(sc_list), "S", "Normalised scattering"))
+    return spec
+
+
+def _quantum_conversion_spec(qc_list: list[QuantumConversionResult], group_key: str) -> dict:
+    spec = _base_spec(f"Quantum conversion - {group_key}", "Wavelength (nm)", "Energy-weighted signal")
+    if qc_list:
+        _add_valid_region(spec, qc_list[0].valid_mask, qc_list[0].wl)
+    spec["layer"].append(_series_layer(_quantum_conversion_rows(qc_list), "E", "Energy-weighted signal"))
+    return spec
+
+
+def _quantum_conversion_scaled_spec(qc_list: list[QuantumConversionResult], group_key: str) -> dict:
+    spec = _base_spec(f"Quantum conversion scaled peaks - {group_key}", "Wavelength (nm)", "Scaled energy-weighted signal")
+    if qc_list:
+        _add_valid_region(spec, qc_list[0].valid_mask, qc_list[0].wl)
+    spec["layer"].append(_series_layer(_quantum_conversion_scaled_rows(qc_list), "E_scaled", "Scaled energy-weighted signal"))
+    return spec
+
+
+def _all_raw_measurements_spec(results: list[GroupResult]) -> dict:
+    spec = _base_spec("All raw measurements", "Wavelength (nm)", "Signal / IntegrationTime")
+    spec["layer"].append(_series_layer(_all_raw_measurement_rows(results), "I", "Signal / IntegrationTime"))
     return spec
 
 
@@ -302,6 +431,13 @@ def _valid_region_from_tr(tr: TransmittanceResult) -> Optional[tuple[float, floa
     return float(wl_valid[0]), float(wl_valid[-1])
 
 
+def _valid_region_from_qc(qc: QuantumConversionResult) -> Optional[tuple[float, float]]:
+    wl_valid = qc.wl[qc.valid_mask]
+    if len(wl_valid) == 0:
+        return None
+    return float(wl_valid[0]), float(wl_valid[-1])
+
+
 def _interest_region(config: Optional[ProcessingConfig]) -> Optional[tuple[float, float]]:
     if config is None:
         return None
@@ -387,6 +523,58 @@ def _save_pdf_scattering(sc_list: list[ScatteringResult], out_path: Path, group_
     )
 
 
+def _save_pdf_quantum_conversion(qc_list: list[QuantumConversionResult], out_path: Path, group_key: str) -> None:
+    series: list[tuple[np.ndarray, np.ndarray, str]] = []
+    seen_incoming: set[str] = set()
+    for qc in qc_list:
+        incoming_label = f"Incoming UV ({qc.blank.parsed.sample}, {qc.blank.parsed.geometry})"
+        if incoming_label not in seen_incoming:
+            series.append((qc.wl, qc.incoming_energy_signal, incoming_label))
+            seen_incoming.add(incoming_label)
+        series.append((qc.wl, qc.emitted_energy_signal, f"Emitted - {qc.sample.parsed.display_label}"))
+    valid = _valid_region_from_qc(qc_list[0]) if qc_list else None
+    _plot_single_pdf(
+        out_path,
+        f"Quantum conversion - {group_key}",
+        "Wavelength (nm)",
+        "Energy-weighted signal",
+        series,
+        valid,
+        None,
+    )
+
+
+def _save_pdf_quantum_conversion_scaled(qc_list: list[QuantumConversionResult], out_path: Path, group_key: str) -> None:
+    series: list[tuple[np.ndarray, np.ndarray, str]] = []
+    seen_incoming: set[str] = set()
+    for qc in qc_list:
+        incoming_label = f"Incoming UV scaled ({qc.blank.parsed.sample}, {qc.blank.parsed.geometry})"
+        if incoming_label not in seen_incoming:
+            series.append((qc.wl, _scale_to_unit_peak(qc.incoming_energy_signal), incoming_label))
+            seen_incoming.add(incoming_label)
+        series.append((qc.wl, _scale_to_unit_peak(qc.emitted_energy_signal), f"Emitted scaled - {qc.sample.parsed.display_label}"))
+    valid = _valid_region_from_qc(qc_list[0]) if qc_list else None
+    _plot_single_pdf(
+        out_path,
+        f"Quantum conversion scaled peaks - {group_key}",
+        "Wavelength (nm)",
+        "Scaled energy-weighted signal",
+        series,
+        valid,
+        None,
+    )
+
+
+def _save_pdf_all_raw_measurements(results: list[GroupResult], out_path: Path) -> None:
+    series: list[tuple[np.ndarray, np.ndarray, str]] = []
+    for sr in _unique_raw_spectra(results):
+        series.append((sr.wl, sr.signal_normalized, f"{sr.parsed.display_label} raw"))
+        series.append((sr.wl, _plot_smooth(sr.signal_normalized), f"{sr.parsed.display_label} smooth"))
+    normalized = any(sr.integration_time_normalization_factor != 1.0 for sr in _unique_raw_spectra(results))
+    y_label = "Signal / IntegrationTime" if normalized else "Signal"
+    _plot_single_pdf(out_path, "All raw measurements", "Wavelength (nm)", y_label, series, None, None)
+
+
 def export_group(
     result: GroupResult,
     out_dir: Path,
@@ -406,35 +594,41 @@ def export_group(
     if result.transmittance_results:
         tr_list = result.transmittance_results
         if export_vega:
+            p = out_dir / "vega" / f"{key}_raw_data.json"
+            p.write_text(json.dumps(_raw_comparison_spec(tr_list, result.group_key), indent=2, ensure_ascii=False), encoding="utf-8")
+            written.append(p)
             p = out_dir / "vega" / f"{key}_transmittance.json"
             p.write_text(json.dumps(_transmittance_spec(tr_list, result.group_key), indent=2, ensure_ascii=False), encoding="utf-8")
             written.append(p)
             p = out_dir / "vega" / f"{key}_absorbance.json"
             p.write_text(json.dumps(_absorbance_spec(tr_list, result.group_key), indent=2, ensure_ascii=False), encoding="utf-8")
             written.append(p)
-            p = out_dir / "vega" / f"{key}_raw_data.json"
-            p.write_text(json.dumps(_raw_comparison_spec(tr_list, result.group_key), indent=2, ensure_ascii=False), encoding="utf-8")
-            written.append(p)
         if export_pdf:
+            p = out_dir / "pdf" / f"{key}_raw_data.pdf"
+            _save_pdf_raw_comparison(tr_list, p, result.group_key)
+            written.append(p)
             p = out_dir / "pdf" / f"{key}_transmittance.pdf"
             _save_pdf_transmittance(tr_list, p, result.group_key, config)
             written.append(p)
             p = out_dir / "pdf" / f"{key}_absorbance.pdf"
             _save_pdf_absorbance(tr_list, p, result.group_key, config)
             written.append(p)
-            p = out_dir / "pdf" / f"{key}_raw_data.pdf"
-            _save_pdf_raw_comparison(tr_list, p, result.group_key)
-            written.append(p)
 
-    if result.scattering_results:
-        sc_list = result.scattering_results
+    if result.quantum_conversion_results:
+        qc_list = result.quantum_conversion_results
         if export_vega:
-            p = out_dir / "vega" / f"{key}_scattering.json"
-            p.write_text(json.dumps(_scattering_spec(sc_list, result.group_key), indent=2, ensure_ascii=False), encoding="utf-8")
+            p = out_dir / "vega" / f"{key}_quantum_conversion.json"
+            p.write_text(json.dumps(_quantum_conversion_spec(qc_list, result.group_key), indent=2, ensure_ascii=False), encoding="utf-8")
+            written.append(p)
+            p = out_dir / "vega" / f"{key}_quantum_conversion_scaled.json"
+            p.write_text(json.dumps(_quantum_conversion_scaled_spec(qc_list, result.group_key), indent=2, ensure_ascii=False), encoding="utf-8")
             written.append(p)
         if export_pdf:
-            p = out_dir / "pdf" / f"{key}_scattering.pdf"
-            _save_pdf_scattering(sc_list, p, result.group_key)
+            p = out_dir / "pdf" / f"{key}_quantum_conversion.pdf"
+            _save_pdf_quantum_conversion(qc_list, p, result.group_key)
+            written.append(p)
+            p = out_dir / "pdf" / f"{key}_quantum_conversion_scaled.pdf"
+            _save_pdf_quantum_conversion_scaled(qc_list, p, result.group_key)
             written.append(p)
 
     return written
@@ -450,6 +644,25 @@ def _observable_columns() -> list[str]:
     return [
         "Group",
         "Sample",
+        "Analysis",
+        "T ROI AUC",
+        "T fit angle [deg]",
+        "T fit a",
+        "T fit b",
+        "A ROI AUC",
+        "A fit angle [deg]",
+        "A fit a",
+        "A fit b",
+        "QC efficiency",
+        "Emitted energy AUC",
+        "Incoming energy AUC",
+    ]
+
+
+def _transmittance_observable_columns() -> list[str]:
+    return [
+        "Group",
+        "Sample",
         "T ROI AUC",
         "T fit angle [deg]",
         "T fit a",
@@ -461,14 +674,23 @@ def _observable_columns() -> list[str]:
     ]
 
 
-def _observable_rows(results: list[GroupResult]) -> list[list[str]]:
+def _quantum_observable_columns() -> list[str]:
+    return [
+        "Group",
+        "Sample",
+        "QC efficiency",
+        "Emitted energy AUC",
+        "Incoming energy AUC",
+    ]
+
+
+def _transmittance_observable_rows(results: list[GroupResult]) -> list[list[str]]:
     rows: list[list[str]] = []
     for result in results:
         for tr in result.transmittance_results:
-            label = tr.sample.parsed.display_label
             rows.append([
                 result.group_key,
-                label,
+                tr.sample.parsed.display_label,
                 _fmt_float(tr.integrals.get("interest_transmittance_auc", float("nan"))),
                 _fmt_float(tr.integrals.get("interest_transmittance_fit_angle_deg", float("nan"))),
                 _fmt_float(tr.integrals.get("interest_transmittance_fit_slope", float("nan"))),
@@ -481,6 +703,277 @@ def _observable_rows(results: list[GroupResult]) -> list[list[str]]:
     return rows
 
 
+def _quantum_observable_rows(results: list[GroupResult]) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for result in results:
+        for qc in result.quantum_conversion_results:
+            rows.append([
+                result.group_key,
+                qc.sample.parsed.display_label,
+                _fmt_float(qc.integrals.get("quantum_conversion_efficiency", float("nan"))),
+                _fmt_float(qc.integrals.get("emitted_energy_auc", float("nan"))),
+                _fmt_float(qc.integrals.get("incoming_energy_auc", float("nan"))),
+            ])
+    return rows
+
+
+def _observable_rows(results: list[GroupResult]) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for result in results:
+        for tr in result.transmittance_results:
+            label = tr.sample.parsed.display_label
+            rows.append([
+                result.group_key,
+                label,
+                "transmittance_absorbance",
+                _fmt_float(tr.integrals.get("interest_transmittance_auc", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_transmittance_fit_angle_deg", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_transmittance_fit_slope", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_transmittance_fit_intercept", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_absorbance_auc", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_absorbance_fit_angle_deg", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_absorbance_fit_slope", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_absorbance_fit_intercept", float("nan"))),
+                "",
+                "",
+                "",
+            ])
+        for qc in result.quantum_conversion_results:
+            label = qc.sample.parsed.display_label
+            rows.append([
+                result.group_key,
+                label,
+                "quantum_conversion",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                _fmt_float(qc.integrals.get("quantum_conversion_efficiency", float("nan"))),
+                _fmt_float(qc.integrals.get("emitted_energy_auc", float("nan"))),
+                _fmt_float(qc.integrals.get("incoming_energy_auc", float("nan"))),
+            ])
+    return rows
+
+
+def _observable_rows_by_diode(results: list[GroupResult]) -> dict[str, list[list[str]]]:
+    rows_by_diode: dict[str, list[list[str]]] = defaultdict(list)
+    for result in results:
+        for tr in result.transmittance_results:
+            rows_by_diode[tr.sample.parsed.diode].append([
+                result.group_key,
+                tr.sample.parsed.display_label,
+                "transmittance_absorbance",
+                _fmt_float(tr.integrals.get("interest_transmittance_auc", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_transmittance_fit_angle_deg", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_transmittance_fit_slope", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_transmittance_fit_intercept", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_absorbance_auc", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_absorbance_fit_angle_deg", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_absorbance_fit_slope", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_absorbance_fit_intercept", float("nan"))),
+                "",
+                "",
+                "",
+            ])
+        for qc in result.quantum_conversion_results:
+            rows_by_diode[qc.sample.parsed.diode].append([
+                result.group_key,
+                qc.sample.parsed.display_label,
+                "quantum_conversion",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                _fmt_float(qc.integrals.get("quantum_conversion_efficiency", float("nan"))),
+                _fmt_float(qc.integrals.get("emitted_energy_auc", float("nan"))),
+                _fmt_float(qc.integrals.get("incoming_energy_auc", float("nan"))),
+            ])
+    return dict(rows_by_diode)
+
+
+def _excel_col_name(index: int) -> str:
+    name = ""
+    while index:
+        index, rem = divmod(index - 1, 26)
+        name = chr(65 + rem) + name
+    return name
+
+
+def _excel_sheet_name(name: str, used: set[str]) -> str:
+    cleaned = re.sub(r"[\[\]:*?/\\]", "_", name).strip() or "Sheet"
+    cleaned = cleaned[:31]
+    candidate = cleaned
+    suffix = 2
+    while candidate in used:
+        tail = f"_{suffix}"
+        candidate = f"{cleaned[:31 - len(tail)]}{tail}"
+        suffix += 1
+    used.add(candidate)
+    return candidate
+
+
+def _worksheet_xml(rows: list[list[str]]) -> str:
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">',
+        '<sheetViews><sheetView workbookViewId="0"/></sheetViews>',
+        '<sheetFormatPr defaultRowHeight="15"/>',
+        '<cols>',
+    ]
+    for idx in range(1, len(rows[0]) + 1):
+        width = 34 if idx in {1, 2} else 16
+        lines.append(f'<col min="{idx}" max="{idx}" width="{width}" customWidth="1"/>')
+    lines.append('</cols><sheetData>')
+    for r_idx, row in enumerate(rows, start=1):
+        lines.append(f'<row r="{r_idx}">')
+        for c_idx, value in enumerate(row, start=1):
+            ref = f"{_excel_col_name(c_idx)}{r_idx}"
+            text = escape(str(value), quote=False)
+            lines.append(f'<c r="{ref}" t="inlineStr"><is><t>{text}</t></is></c>')
+        lines.append('</row>')
+    lines.append(
+        f'</sheetData><tableParts count="1"><tablePart r:id="rId1"/></tableParts></worksheet>'
+    )
+    return "".join(lines)
+
+
+def _write_observable_rows_xlsx(results: list[GroupResult], out_dir: Path) -> Path:
+    out_path = out_dir / "final_report_observables.xlsx"
+    used_names: set[str] = set()
+    sheets: list[tuple[str, list[list[str]]]] = []
+    tr_by_diode: dict[str, list[list[str]]] = defaultdict(list)
+    qc_by_diode: dict[str, list[list[str]]] = defaultdict(list)
+    for result in results:
+        for tr in result.transmittance_results:
+            tr_by_diode[tr.sample.parsed.diode].append([
+                result.group_key,
+                tr.sample.parsed.display_label,
+                _fmt_float(tr.integrals.get("interest_transmittance_auc", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_transmittance_fit_angle_deg", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_transmittance_fit_slope", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_transmittance_fit_intercept", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_absorbance_auc", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_absorbance_fit_angle_deg", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_absorbance_fit_slope", float("nan"))),
+                _fmt_float(tr.integrals.get("interest_absorbance_fit_intercept", float("nan"))),
+            ])
+        for qc in result.quantum_conversion_results:
+            qc_by_diode[qc.sample.parsed.diode].append([
+                result.group_key,
+                qc.sample.parsed.display_label,
+                _fmt_float(qc.integrals.get("quantum_conversion_efficiency", float("nan"))),
+                _fmt_float(qc.integrals.get("emitted_energy_auc", float("nan"))),
+                _fmt_float(qc.integrals.get("incoming_energy_auc", float("nan"))),
+            ])
+
+    for diode, rows in sorted(tr_by_diode.items()):
+        sheets.append((_excel_sheet_name(f"{diode}_T", used_names), [_transmittance_observable_columns(), *rows]))
+    for diode, rows in sorted(qc_by_diode.items()):
+        sheets.append((_excel_sheet_name(f"{diode}_QC", used_names), [_quantum_observable_columns(), *rows]))
+    if not sheets:
+        sheets.append((_excel_sheet_name("Observables", used_names), [_observable_columns()]))
+
+    workbook_sheets = "".join(
+        f'<sheet name="{escape(name)}" sheetId="{idx}" r:id="rId{idx}"/>'
+        for idx, (name, _rows) in enumerate(sheets, start=1)
+    )
+    workbook_rels = "".join(
+        f'<Relationship Id="rId{idx}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{idx}.xml"/>'
+        for idx, _sheet in enumerate(sheets, start=1)
+    )
+    workbook_rels += (
+        f'<Relationship Id="rId{len(sheets) + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+    )
+    overrides = "".join(
+        f'<Override PartName="/xl/worksheets/sheet{idx}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        f'<Override PartName="/xl/tables/table{idx}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/>'
+        for idx, _sheet in enumerate(sheets, start=1)
+    )
+
+    with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+            '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
+            '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>'
+            f'{overrides}</Types>'
+        ))
+        zf.writestr("_rels/.rels", (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+            '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>'
+            '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>'
+            '</Relationships>'
+        ))
+        zf.writestr("docProps/core.xml", (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+            'xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Spectrophotometer observables</dc:title></cp:coreProperties>'
+        ))
+        zf.writestr("docProps/app.xml", (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties">'
+            '<Application>Spectrophotometer analysis</Application></Properties>'
+        ))
+        zf.writestr("xl/workbook.xml", (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            f'<sheets>{workbook_sheets}</sheets></workbook>'
+        ))
+        zf.writestr("xl/_rels/workbook.xml.rels", (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            f'{workbook_rels}</Relationships>'
+        ))
+        zf.writestr("xl/styles.xml", (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>'
+            '<fills count="1"><fill><patternFill patternType="none"/></fill></fills>'
+            '<borders count="1"><border/></borders>'
+            '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+            '<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>'
+            '</styleSheet>'
+        ))
+        for idx, (_name, rows) in enumerate(sheets, start=1):
+            zf.writestr(f"xl/worksheets/sheet{idx}.xml", _worksheet_xml(rows))
+            zf.writestr(f"xl/worksheets/_rels/sheet{idx}.xml.rels", (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                f'<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table{idx}.xml"/>'
+                '</Relationships>'
+            ))
+            columns = rows[0]
+            ref = f"A1:{_excel_col_name(len(columns))}{max(2, len(rows))}"
+            table_cols = "".join(
+                f'<tableColumn id="{col_idx}" name="{escape(name)}"/>'
+                for col_idx, name in enumerate(columns, start=1)
+            )
+            zf.writestr(f"xl/tables/table{idx}.xml", (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                f'<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="{idx}" name="Table{idx}" displayName="Table{idx}" ref="{ref}" totalsRowShown="0">'
+                f'<autoFilter ref="{ref}"/><tableColumns count="{len(columns)}">{table_cols}</tableColumns>'
+                '<tableStyleInfo name="TableStyleMedium2" showFirstColumn="0" showLastColumn="0" showRowStripes="1" showColumnStripes="0"/>'
+                '</table>'
+            ))
+    return out_path
+
+
 def _write_observable_rows_csv(results: list[GroupResult], out_dir: Path) -> Path:
     out_path = out_dir / "final_report_observables.csv"
     with out_path.open("w", newline="", encoding="utf-8") as f:
@@ -488,6 +981,31 @@ def _write_observable_rows_csv(results: list[GroupResult], out_dir: Path) -> Pat
         writer.writerow(_observable_columns())
         writer.writerows(_observable_rows(results))
     return out_path
+
+
+def _write_analysis_observable_csvs(results: list[GroupResult], out_dir: Path) -> list[Path]:
+    written: list[Path] = []
+    tables = [
+        (
+            out_dir / "final_report_transmittance_observables.csv",
+            _transmittance_observable_columns(),
+            _transmittance_observable_rows(results),
+        ),
+        (
+            out_dir / "final_report_quantum_conversion_observables.csv",
+            _quantum_observable_columns(),
+            _quantum_observable_rows(results),
+        ),
+    ]
+    for path, columns, rows in tables:
+        if not rows:
+            continue
+        with path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(columns)
+            writer.writerows(rows)
+        written.append(path)
+    return written
 
 
 def _report_text_page(pdf, title: str, lines: list[str]) -> None:
@@ -506,32 +1024,51 @@ def _report_text_page(pdf, title: str, lines: list[str]) -> None:
     plt.close(fig)
 
 
-def _report_table_pages(pdf, rows: list[list[str]]) -> None:
+def _report_table_pages(pdf, title: str, columns: list[str], rows: list[list[str]]) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    columns = _observable_columns()
     if not rows:
-        _report_text_page(pdf, "ROI observables", ["No transmittance/absorbance observables were calculated."])
+        _report_text_page(pdf, title, ["No observables were calculated."])
         return
 
     page_size = 18
     for start in range(0, len(rows), page_size):
         chunk = rows[start:start + page_size]
+
         fig, ax = plt.subplots(figsize=(11.69, 8.27))
         ax.axis("off")
-        ax.set_title("ROI observables", fontsize=16, weight="bold", pad=18)
-        col_widths = [0.19, 0.19, 0.09, 0.09, 0.07, 0.08, 0.09, 0.09, 0.07, 0.08]
-        table = ax.table(cellText=chunk, colLabels=columns, loc="center", cellLoc="left", colLoc="left",colWidths=col_widths)
+        ax.set_title(title, fontsize=16, weight="bold", pad=18)
+
+        weights = [
+            1.0 if col == "Group"
+            else 3.5 if col == "Sample"
+            else 1.0
+            for col in columns
+        ]
+
+        col_widths = [w / sum(weights) for w in weights]
+
+        table = ax.table(
+            cellText=chunk,
+            colLabels=columns,
+            loc="center",
+            cellLoc="left",
+            colLoc="left",
+            colWidths=col_widths,
+        )
+
         table.auto_set_font_size(False)
         table.set_fontsize(6)
         table.scale(1, 1.35)
+
         for (row, _col), cell in table.get_celld().items():
             if row == 0:
                 cell.set_text_props(weight="bold")
                 cell.set_facecolor("#eeeeee")
+
         pdf.savefig(fig, bbox_inches="tight")
         plt.close(fig)
 
@@ -596,12 +1133,34 @@ def _write_final_report_pdf(
                 "The following pages contain observables first, then all generated plot pages.",
             ],
         )
-        _report_table_pages(pdf, _observable_rows(results))
+        _report_table_pages(
+            pdf,
+            "Transmittance observables",
+            _transmittance_observable_columns(),
+            _transmittance_observable_rows(results),
+        )
+        _report_table_pages(
+            pdf,
+            "Quantum conversion observables",
+            _quantum_observable_columns(),
+            _quantum_observable_rows(results),
+        )
 
         for result in results:
             if result.transmittance_results:
                 tr_list = result.transmittance_results
                 valid = _valid_region_from_tr(tr_list[0])
+                raw_series: list[tuple[np.ndarray, np.ndarray, str]] = []
+                seen_blank_labels: set[str] = set()
+                for tr in tr_list:
+                    blank_label = f"Air reference ({tr.blank.parsed.diode}, {tr.blank.parsed.geometry})"
+                    if blank_label not in seen_blank_labels:
+                        raw_series.append((tr.blank.wl, tr.blank.signal_normalized, blank_label))
+                        seen_blank_labels.add(blank_label)
+                    raw_series.append((tr.sample.wl, tr.sample.signal_normalized, tr.sample.parsed.display_label))
+                normalized = any((tr.sample.integration_time_normalization_factor != 1.0 or tr.blank.integration_time_normalization_factor != 1.0) for tr in tr_list)
+                y_label = "Raw signal / IntegrationTime" if normalized else "Raw signal"
+                _report_plot_page(pdf, f"Raw measurement comparison - {result.group_key}", "Wavelength (nm)", y_label, raw_series, valid)
                 _report_plot_page(
                     pdf,
                     f"Transmittance - {result.group_key}",
@@ -625,27 +1184,49 @@ def _write_final_report_pdf(
                     _fit_overlays(tr_list, "absorbance"),
                 )
 
-                raw_series: list[tuple[np.ndarray, np.ndarray, str]] = []
-                seen_blank_labels: set[str] = set()
-                for tr in tr_list:
-                    blank_label = f"Air reference ({tr.blank.parsed.diode}, {tr.blank.parsed.geometry})"
-                    if blank_label not in seen_blank_labels:
-                        raw_series.append((tr.blank.wl, tr.blank.signal_normalized, blank_label))
-                        seen_blank_labels.add(blank_label)
-                    raw_series.append((tr.sample.wl, tr.sample.signal_normalized, tr.sample.parsed.display_label))
-                normalized = any((tr.sample.integration_time_normalization_factor != 1.0 or tr.blank.integration_time_normalization_factor != 1.0) for tr in tr_list)
-                y_label = "Raw signal / IntegrationTime" if normalized else "Raw signal"
-                _report_plot_page(pdf, f"Raw measurement comparison - {result.group_key}", "Wavelength (nm)", y_label, raw_series, valid)
-
-            if result.scattering_results:
-                sc_list = result.scattering_results
+            if result.quantum_conversion_results:
+                qc_list = result.quantum_conversion_results
+                series: list[tuple[np.ndarray, np.ndarray, str]] = []
+                seen_incoming: set[str] = set()
+                for qc in qc_list:
+                    incoming_label = f"Incoming UV ({qc.blank.parsed.sample}, {qc.blank.parsed.geometry})"
+                    if incoming_label not in seen_incoming:
+                        series.append((qc.wl, qc.incoming_energy_signal, incoming_label))
+                        seen_incoming.add(incoming_label)
+                    series.append((qc.wl, qc.emitted_energy_signal, f"Emitted - {qc.sample.parsed.display_label}"))
                 _report_plot_page(
                     pdf,
-                    f"Scattering shape 90deg - {result.group_key}",
+                    f"Quantum conversion - {result.group_key}",
                     "Wavelength (nm)",
-                    "Normalised scattering intensity",
-                    [(sc.wl, sc.signal_shape_smooth, sc.sample.parsed.display_label) for sc in sc_list],
+                    "Energy-weighted signal",
+                    series,
+                    _valid_region_from_qc(qc_list[0]),
                 )
+                scaled_series: list[tuple[np.ndarray, np.ndarray, str]] = []
+                seen_incoming_scaled: set[str] = set()
+                for qc in qc_list:
+                    incoming_label = f"Incoming UV scaled ({qc.blank.parsed.sample}, {qc.blank.parsed.geometry})"
+                    if incoming_label not in seen_incoming_scaled:
+                        scaled_series.append((qc.wl, _scale_to_unit_peak(qc.incoming_energy_signal), incoming_label))
+                        seen_incoming_scaled.add(incoming_label)
+                    scaled_series.append((qc.wl, _scale_to_unit_peak(qc.emitted_energy_signal), f"Emitted scaled - {qc.sample.parsed.display_label}"))
+                _report_plot_page(
+                    pdf,
+                    f"Quantum conversion scaled peaks - {result.group_key}",
+                    "Wavelength (nm)",
+                    "Scaled energy-weighted signal",
+                    scaled_series,
+                    _valid_region_from_qc(qc_list[0]),
+                )
+
+        raw_series: list[tuple[np.ndarray, np.ndarray, str]] = []
+        for sr in _unique_raw_spectra(results):
+            raw_series.append((sr.wl, sr.signal_normalized, f"{sr.parsed.display_label} raw"))
+            raw_series.append((sr.wl, _plot_smooth(sr.signal_normalized), f"{sr.parsed.display_label} smooth"))
+        if raw_series:
+            normalized = any(sr.integration_time_normalization_factor != 1.0 for sr in _unique_raw_spectra(results))
+            y_label = "Signal / IntegrationTime" if normalized else "Signal"
+            _report_plot_page(pdf, "All raw measurements", "Wavelength (nm)", y_label, raw_series)
 
     return report_path
 
@@ -660,7 +1241,21 @@ def export_all(
     all_written: list[Path] = []
     for r in results:
         all_written.extend(export_group(r, out_dir, config, export_vega=export_vega, export_pdf=export_pdf))
-    all_written.append(_write_observable_rows_csv(results, Path(out_dir)))
+    out_dir = Path(out_dir)
+    if _unique_raw_spectra(results):
+        if export_vega:
+            (out_dir / "vega").mkdir(parents=True, exist_ok=True)
+            p = out_dir / "vega" / "all_raw_measurements.json"
+            p.write_text(json.dumps(_all_raw_measurements_spec(results), indent=2, ensure_ascii=False), encoding="utf-8")
+            all_written.append(p)
+        if export_pdf:
+            (out_dir / "pdf").mkdir(parents=True, exist_ok=True)
+            p = out_dir / "pdf" / "all_raw_measurements.pdf"
+            _save_pdf_all_raw_measurements(results, p)
+            all_written.append(p)
+    all_written.append(_write_observable_rows_csv(results, out_dir))
+    all_written.extend(_write_analysis_observable_csvs(results, out_dir))
+    all_written.append(_write_observable_rows_xlsx(results, out_dir))
     if export_pdf:
-        all_written.append(_write_final_report_pdf(results, Path(out_dir), config))
+        all_written.append(_write_final_report_pdf(results, out_dir, config))
     return all_written

@@ -108,7 +108,7 @@ Common options:
 python -m spectro_app.cli /path/to/raw_data \
   --analysis-window 400,750 \
   --interest-window 470,570 \
-  --baseline-ranges '190,350;850,1020' \
+  --baseline-ranges '190,550;650,1020' \
   --smooth-window 41
 ```
 

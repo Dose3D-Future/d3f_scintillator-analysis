@@ -20,7 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("output_dir", type=Path, nargs="?", help="Output folder; default: input_dir/analysis_outputs")
     p.add_argument("--analysis-window", default="400,750", help="Analysis window in nm, e.g. 400,750")
     p.add_argument("--interest-window", default="470,570", help="ROI used for final-report AUC and linear-fit angle, e.g. 470,570")
-    p.add_argument("--baseline-ranges", default="190,350;850,1020", help="Baseline ranges, e.g. 190,350;850,1020")
+    p.add_argument("--baseline-ranges", default="190,550;650,1020", help="Baseline ranges, e.g. 190,550;650,1020")
     p.add_argument("--smooth-window", type=int, default=41)
     p.add_argument("--smooth-polyorder", type=int, default=3)
     p.add_argument("--no-pdf", action="store_true", help="Do not export PDF plots")

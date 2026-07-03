@@ -47,6 +47,8 @@ DIODE_TOKENS = {
     "470nm",
     "472nm",
     "blue",
+    "bkg",
+    "background",
 }
 GEOMETRY_TOKENS = {"0deg", "90deg", "0degree", "90degree"}
 AIR_TOKENS = {"air", "blank", "empty", "powietrze"}
@@ -147,6 +149,10 @@ def _classify_role(sample_lower: str) -> str:
     return "scintillator"
 
 
+def _is_background_diode(diode: str) -> bool:
+    return diode.lower() in {"bkg", "background"}
+
+
 def _normalise_geometry(tok: str) -> str:
     low = tok.lower()
     if low in {"0degree"}:
@@ -206,7 +212,7 @@ def parse_filename(path: Path | str) -> Optional[ParsedFile]:
 
     sample = "_".join(sample_tokens) if sample_tokens else "Unknown"
     config = "_".join(config_tokens) if config_tokens else "DEFAULT"
-    role = _classify_role(sample.lower())
+    role = "background" if _is_background_diode(diode) else _classify_role(sample.lower())
     measurement_type = "scattering" if geometry.lower() == "90deg" else "transmittance"
 
     return ParsedFile(
@@ -272,11 +278,14 @@ def group_by_plot(files: list[ParsedFile], split_samples: bool = True) -> dict[s
     config are plotted together, still using the shared Air reference.
     """
     blanks_by_reference: dict[tuple[str, str, str], list[ParsedFile]] = defaultdict(list)
+    backgrounds_by_series_geometry: dict[tuple[str, str], list[ParsedFile]] = defaultdict(list)
     samples_by_base: dict[tuple[str, str, str, str], list[ParsedFile]] = defaultdict(list)
 
     for pf in files:
         if pf.role == "blank_air":
             blanks_by_reference[pf.reference_key_tuple].append(pf)
+        elif pf.role == "background":
+            backgrounds_by_series_geometry[(pf.series_id, pf.geometry)].append(pf)
         elif pf.role in {"scintillator", "quartz"}:
             samples_by_base[pf.base_key_tuple].append(pf)
 
@@ -287,16 +296,19 @@ def group_by_plot(files: list[ParsedFile], split_samples: bool = True) -> dict[s
         series_id, diode, geometry, _config = base_tuple
         ref_key = (series_id, diode, geometry)
         blanks = blanks_by_reference.get(ref_key, [])
+        if diode.lower() == "uv" and geometry.lower() == "90deg":
+            blanks = [*blanks, *blanks_by_reference.get((series_id, diode, "0deg"), [])]
+        backgrounds = backgrounds_by_series_geometry.get((series_id, geometry), [])
         if blanks:
             used_blank_keys.add(ref_key)
 
         if split_samples:
             for sample in sorted(samples, key=lambda pf: (pf.sample, pf.config, pf.path.name)):
                 key = sample.sample_key
-                groups[key] = [sample, *blanks]
+                groups[key] = [sample, *blanks, *backgrounds]
         else:
             key = "_".join(base_tuple)
-            groups[key] = [*sorted(samples, key=lambda pf: (pf.sample, pf.config, pf.path.name)), *blanks]
+            groups[key] = [*sorted(samples, key=lambda pf: (pf.sample, pf.config, pf.path.name)), *blanks, *backgrounds]
 
     # Do not create plot groups from standalone Air references. They are useful
     # only as references for sample groups; otherwise they would produce noisy
@@ -309,11 +321,11 @@ def validate_group(group: list[ParsedFile]) -> list[str]:
     if not group:
         return ["Empty group"]
 
-    geometries = {pf.geometry for pf in group}
+    geometries = {pf.geometry for pf in group if not (pf.role == "blank_air" and pf.geometry.lower() == "0deg")}
     if len(geometries) > 1:
         warnings.append(f"Mixed geometries in group: {sorted(geometries)}")
 
-    diodes = {pf.diode for pf in group}
+    diodes = {pf.diode for pf in group if pf.role != "background"}
     if len(diodes) > 1:
         warnings.append(f"Multiple diodes in one group: {sorted(diodes)}")
 
@@ -323,11 +335,11 @@ def validate_group(group: list[ParsedFile]) -> list[str]:
 
     # Air/blank files usually have DEFAULT config, while samples carry the
     # actual cube orientation. Only sample configs should be checked here.
-    sample_configs = {pf.config for pf in group if pf.role != "blank_air"}
+    sample_configs = {pf.config for pf in group if pf.role not in {"blank_air", "background"}}
     if len(sample_configs) > 1:
         warnings.append(f"Multiple sample configurations in one group: {sorted(sample_configs)}")
 
-    mtypes = {pf.measurement_type for pf in group}
+    mtypes = {pf.measurement_type for pf in group if not (pf.role == "blank_air" and pf.geometry.lower() == "0deg")}
     if len(mtypes) > 1:
         warnings.append(f"Mixed measurement types in one group: {sorted(mtypes)}")
 

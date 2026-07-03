@@ -5,17 +5,18 @@ from __future__ import annotations
 import queue
 import threading
 import tkinter as tk
+import traceback
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 if __package__:
     from .file_parser import scan_folder, validate_dataset
     from .pipeline import parse_pair, parse_ranges, run_pipeline
-    from .processor import ProcessingConfig
+    from .processor import ProcessingConfig, load_spectrum
 else:
     from file_parser import scan_folder, validate_dataset
     from pipeline import parse_pair, parse_ranges, run_pipeline
-    from processor import ProcessingConfig
+    from processor import ProcessingConfig, load_spectrum
 
 
 class SpectroApp(tk.Tk):
@@ -29,7 +30,7 @@ class SpectroApp(tk.Tk):
         self.output_var = tk.StringVar()
         self.analysis_window_var = tk.StringVar(value="400,750")
         self.interest_window_var = tk.StringVar(value="470,570")
-        self.baseline_ranges_var = tk.StringVar(value="190,350;850,1020")
+        self.baseline_ranges_var = tk.StringVar(value="190,550;650,1020")
         self.smooth_window_var = tk.StringVar(value="41")
         self.smooth_poly_var = tk.StringVar(value="3")
         self.split_samples_var = tk.BooleanVar(value=True)
@@ -89,7 +90,7 @@ class SpectroApp(tk.Tk):
 
         table_frame = ttk.LabelFrame(middle, text="Detected files")
         middle.add(table_frame, weight=3)
-        columns = ("file", "series", "diode", "sample", "geometry", "config", "role", "status")
+        columns = ("file", "series", "diode", "sample", "geometry", "config", "time", "role", "status")
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=14)
         headings = {
             "file": "File",
@@ -98,10 +99,11 @@ class SpectroApp(tk.Tk):
             "sample": "Sample",
             "geometry": "Geometry",
             "config": "Config",
+            "time": "Time",
             "role": "Role",
             "status": "Status",
         }
-        widths = {"file": 300, "series": 80, "diode": 70, "sample": 120, "geometry": 80, "config": 100, "role": 120, "status": 170}
+        widths = {"file": 300, "series": 80, "diode": 70, "sample": 120, "geometry": 80, "config": 100, "time": 80, "role": 120, "status": 170}
         for col in columns:
             self.tree.heading(col, text=headings[col])
             self.tree.column(col, width=widths[col], anchor="w")
@@ -152,6 +154,15 @@ class SpectroApp(tk.Tk):
             normalize_by_integration_time=self.normalize_integration_var.get(),
         )
 
+    def _file_time_label(self, path: Path) -> str:
+        try:
+            value = load_spectrum(path).attrs.get("integration_time")
+        except Exception:
+            return "-"
+        if value is None:
+            return "-"
+        return f"{float(value):g}"
+
     def scan_current_folder(self) -> None:
         folder_text = self.input_var.get().strip()
         if not folder_text:
@@ -169,7 +180,17 @@ class SpectroApp(tk.Tk):
             self.tree.insert(
                 "",
                 tk.END,
-                values=(pf.path.name, pf.series_id, pf.diode, pf.sample, pf.geometry, pf.config, pf.role, status),
+                values=(
+                    pf.path.name,
+                    pf.series_id,
+                    pf.diode,
+                    pf.sample,
+                    pf.geometry,
+                    pf.config,
+                    self._file_time_label(pf.path),
+                    pf.role,
+                    status,
+                ),
             )
         self.log(f"Scanned: {folder}")
         self.log(f"Detected parseable files: {len(files)}")
@@ -212,7 +233,7 @@ class SpectroApp(tk.Tk):
             run = run_pipeline(**kwargs)
             self._queue.put(("done", run))
         except Exception as exc:
-            self._queue.put(("error", exc))
+            self._queue.put(("error", (exc, traceback.format_exc())))
 
     def _poll_queue(self) -> None:
         try:
@@ -228,9 +249,11 @@ class SpectroApp(tk.Tk):
                     self.run_button.configure(state=tk.NORMAL)
                     messagebox.showinfo("Analysis complete", f"Output written to:\n{run.output_dir}")
                 elif kind == "error":
-                    self.log(f"ERROR: {payload}")
+                    exc, tb = payload
+                    self.log(f"ERROR: {exc}")
+                    self.log(tb)
                     self.run_button.configure(state=tk.NORMAL)
-                    messagebox.showerror("Analysis failed", str(payload))
+                    messagebox.showerror("Analysis failed", str(exc))
         except queue.Empty:
             pass
         self.after(120, self._poll_queue)

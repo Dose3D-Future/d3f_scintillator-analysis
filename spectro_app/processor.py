@@ -46,7 +46,7 @@ class ProcessingConfig:
     analysis_window_nm: tuple[float, float] = (400.0, 750.0)
     interest_window_nm: tuple[float, float] = (470.0, 570.0)
     baseline_ranges_nm: list[tuple[float, float]] = field(
-        default_factory=lambda: [(190.0, 350.0), (850.0, 1020.0)]
+        default_factory=lambda: [(190.0, 550.0), (650.0, 1020.0)]
     )
     blank_min_fraction_of_peak: float = 0.02
     signal_floor_fraction_of_peak: float = 0.005
@@ -225,6 +225,8 @@ def _baseline_noise(
     if not mask.any():
         return 0.0, 0.0
     baseline_vals = signal[mask]
+    baseline_vals = baseline_vals/40.0
+
     return float(np.nanmedian(baseline_vals)), float(np.nanstd(baseline_vals))
 
 
@@ -292,6 +294,15 @@ def _integrate(wl: np.ndarray, values: np.ndarray, mask: np.ndarray) -> float:
     return float(np.trapz(v_m, wl_m))
 
 
+def _photon_energy_weighted_signal(wl_nm: np.ndarray, signal: np.ndarray) -> np.ndarray:
+    """Scale each wavelength bin by photon energy proportional to 1/lambda."""
+    wl_nm = np.asarray(wl_nm, dtype=float)
+    out = np.full_like(signal, np.nan, dtype=float)
+    mask = np.isfinite(wl_nm) & (wl_nm > 0) & np.isfinite(signal)
+    out[mask] = signal[mask] / wl_nm[mask]
+    return out
+
+
 def _linear_fit_observables(wl: np.ndarray, values: np.ndarray, mask: np.ndarray) -> dict[str, float]:
     finite = mask & np.isfinite(wl) & np.isfinite(values)
     if finite.sum() < 2:
@@ -325,6 +336,7 @@ class SpectrumResult:
     signal_gated: np.ndarray
     baseline_offset: float
     noise_std: float
+    background: Optional["SpectrumResult"] = None
     metadata: dict[str, str] = field(default_factory=dict)
     source_member: str = ""
     integration_time: Optional[float] = None
@@ -340,6 +352,17 @@ class TransmittanceResult:
     transmittance_smooth: np.ndarray
     absorbance: np.ndarray
     absorbance_smooth: np.ndarray
+    valid_mask: np.ndarray
+    integrals: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class QuantumConversionResult:
+    sample: SpectrumResult
+    blank: SpectrumResult
+    wl: np.ndarray
+    emitted_energy_signal: np.ndarray
+    incoming_energy_signal: np.ndarray
     valid_mask: np.ndarray
     integrals: dict[str, float] = field(default_factory=dict)
 
@@ -365,12 +388,17 @@ class GroupResult:
     series_id: str = ""
     sample: str = ""
     transmittance_results: list[TransmittanceResult] = field(default_factory=list)
+    quantum_conversion_results: list[QuantumConversionResult] = field(default_factory=list)
     scattering_results: list[ScatteringResult] = field(default_factory=list)
     raw_spectra: list[SpectrumResult] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
 
-def _process_spectrum(pf: ParsedFile, cfg: ProcessingConfig) -> SpectrumResult:
+def _process_spectrum(
+    pf: ParsedFile,
+    cfg: ProcessingConfig,
+    background: Optional[SpectrumResult] = None,
+) -> SpectrumResult:
     df = load_spectrum(pf.path)
     wl = df["wavelength_nm"].to_numpy(dtype=float)
     raw = df["signal_raw"].to_numpy(dtype=float)
@@ -386,6 +414,12 @@ def _process_spectrum(pf: ParsedFile, cfg: ProcessingConfig) -> SpectrumResult:
         norm_factor = 1.0
 
     signal = raw / norm_factor
+    if background is not None:
+        if _same_grid(wl, background.wl):
+            signal = signal - background.signal_normalized
+        else:
+            signal = signal - np.interp(wl, background.wl, background.signal_normalized)
+        signal = np.clip(signal, 0, None)
 
     offset, noise_std = _baseline_noise(wl, signal, cfg.baseline_ranges_nm)
     net = signal - offset
@@ -410,6 +444,7 @@ def _process_spectrum(pf: ParsedFile, cfg: ProcessingConfig) -> SpectrumResult:
         signal_gated=gated,
         baseline_offset=offset,
         noise_std=noise_std,
+        background=background,
         metadata=metadata,
         source_member=source_member,
         integration_time=integration_time,
@@ -436,9 +471,27 @@ def process_group(
         sample=representative.sample,
     )
 
-    for pf in group:
+    background_files = [pf for pf in group if pf.role == "background"]
+    backgrounds: list[SpectrumResult] = []
+    for pf in background_files:
         try:
-            sr = _process_spectrum(pf, cfg)
+            backgrounds.append(_process_spectrum(pf, cfg))
+        except Exception as exc:
+            result.warnings.append(f"Could not load background {pf.path.name}: {exc}")
+
+    background_sr = backgrounds[0] if backgrounds else None
+    if len(backgrounds) > 1:
+        result.warnings.append(
+            f"Multiple BKG/background files found; using {background_sr.parsed.path.name}"
+        )
+
+    for pf in group:
+        if pf.role == "background":
+            if pf is background_sr.parsed if background_sr else False:
+                result.raw_spectra.append(background_sr)
+            continue
+        try:
+            sr = _process_spectrum(pf, cfg, background=background_sr)
             result.raw_spectra.append(sr)
         except Exception as exc:
             result.warnings.append(f"Could not load {pf.path.name}: {exc}")
@@ -449,7 +502,7 @@ def process_group(
     if representative.measurement_type == "transmittance":
         blank_sr = next((sr for sr in result.raw_spectra if sr.parsed.role == "blank_air"), None)
         if blank_sr is None:
-            result.warnings.append("No Air blank found - transmittance cannot be calculated")
+            result.warnings.append("No Air blank found - transmittance/quantum conversion cannot be calculated")
             return result
 
         blank_wl = blank_sr.wl
@@ -459,12 +512,39 @@ def process_group(
         analysis_mask = (blank_wl >= analysis_lo) & (blank_wl <= analysis_hi)
         valid_blank = (blank_gated > 0) & (blank_gated >= blank_threshold)
         valid_ratio = valid_blank & analysis_mask
+        is_uv = representative.diode.lower() == "uv"
 
         for sr in result.raw_spectra:
             if sr.parsed.role not in {"scintillator", "quartz"}:
                 continue
             if not _same_grid(sr.wl, blank_wl):
                 result.warnings.append(f"{sr.parsed.path.name}: wavelength grid mismatch with blank - skipped")
+                continue
+
+            if is_uv:
+                emitted_energy = _photon_energy_weighted_signal(blank_wl, sr.signal_net)
+                incoming_energy = _photon_energy_weighted_signal(blank_wl, blank_sr.signal_net)
+                valid = valid_ratio & np.isfinite(emitted_energy) & np.isfinite(incoming_energy)
+                emitted_auc = _integrate(blank_wl, emitted_energy, valid)
+                incoming_auc = _integrate(blank_wl, incoming_energy, valid)
+                qcy = emitted_auc / incoming_auc if np.isfinite(incoming_auc) and incoming_auc > 0 else float("nan")
+                result.quantum_conversion_results.append(
+                    QuantumConversionResult(
+                        sample=sr,
+                        blank=blank_sr,
+                        wl=blank_wl,
+                        emitted_energy_signal=emitted_energy,
+                        incoming_energy_signal=incoming_energy,
+                        valid_mask=valid,
+                        integrals={
+                            "quantum_conversion_efficiency": qcy,
+                            "emitted_energy_auc": emitted_auc,
+                            "incoming_energy_auc": incoming_auc,
+                            "sample_integration_time": float(sr.integration_time) if sr.integration_time is not None else float("nan"),
+                            "blank_integration_time": float(blank_sr.integration_time) if blank_sr.integration_time is not None else float("nan"),
+                        },
+                    )
+                )
                 continue
 
             T = _safe_ratio(sr.signal_gated, blank_gated, valid_ratio)
@@ -509,15 +589,17 @@ def process_group(
             )
 
     else:
-        scatter_blank = next((sr for sr in result.raw_spectra if sr.parsed.role == "blank_air"), None)
+        scatter_blank = next((sr for sr in result.raw_spectra if sr.parsed.role == "blank_air" and sr.parsed.geometry == representative.geometry), None)
+        incoming_blank = next((sr for sr in result.raw_spectra if sr.parsed.role == "blank_air" and sr.parsed.geometry.lower() == "0deg"), None)
+        is_uv = representative.diode.lower() == "uv"
         for sr in result.raw_spectra:
             if sr.parsed.role not in {"scintillator", "quartz"}:
                 continue
 
             wl = sr.wl
-            y = sr.signal_gated.copy()
+            y = sr.signal_net.copy()
             if scatter_blank is not None and _same_grid(wl, scatter_blank.wl):
-                y_net = np.clip(y - scatter_blank.signal_gated, 0, None)
+                y_net = np.clip(y - scatter_blank.signal_net, 0, None)
             else:
                 y_net = y
 
@@ -531,6 +613,44 @@ def process_group(
                 "sample_integration_time": float(sr.integration_time) if sr.integration_time is not None else float("nan"),
                 "blank_integration_time": float(scatter_blank.integration_time) if scatter_blank and scatter_blank.integration_time is not None else float("nan"),
             }
+            if is_uv and incoming_blank is not None:
+                if _same_grid(wl, incoming_blank.wl):
+                    incoming_signal = incoming_blank.signal_net
+                    incoming_wl = incoming_blank.wl
+                else:
+                    incoming_wl = wl
+                    incoming_signal = np.interp(wl, incoming_blank.wl, incoming_blank.signal_net)
+                emitted_energy = _photon_energy_weighted_signal(wl, y_net)
+                incoming_energy = _photon_energy_weighted_signal(incoming_wl, incoming_signal)
+                incoming_peak = float(np.nanmax(incoming_signal)) if incoming_signal.size else 0.0
+                incoming_valid = incoming_signal >= (cfg.blank_min_fraction_of_peak * incoming_peak)
+                qc_valid = (
+                    (wl >= analysis_lo)
+                    & (wl <= analysis_hi)
+                    & np.isfinite(emitted_energy)
+                    & np.isfinite(incoming_energy)
+                    & incoming_valid
+                )
+                emitted_auc = _integrate(wl, emitted_energy, qc_valid)
+                incoming_auc = _integrate(wl, incoming_energy, qc_valid)
+                qcy = emitted_auc / incoming_auc if np.isfinite(incoming_auc) and incoming_auc > 0 else float("nan")
+                result.quantum_conversion_results.append(
+                    QuantumConversionResult(
+                        sample=sr,
+                        blank=incoming_blank,
+                        wl=wl,
+                        emitted_energy_signal=emitted_energy,
+                        incoming_energy_signal=incoming_energy,
+                        valid_mask=qc_valid,
+                        integrals={
+                            "quantum_conversion_efficiency": qcy,
+                            "emitted_energy_auc": emitted_auc,
+                            "incoming_energy_auc": incoming_auc,
+                            "sample_integration_time": float(sr.integration_time) if sr.integration_time is not None else float("nan"),
+                            "blank_integration_time": float(incoming_blank.integration_time) if incoming_blank.integration_time is not None else float("nan"),
+                        },
+                    )
+                )
             result.scattering_results.append(
                 ScatteringResult(
                     sample=sr,

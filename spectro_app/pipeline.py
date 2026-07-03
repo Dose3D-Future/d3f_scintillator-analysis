@@ -167,6 +167,46 @@ def curves_dataframe(results: list[GroupResult], include_raw: bool = False) -> p
                     }
                 )
 
+        for qc in result.quantum_conversion_results:
+            pf = qc.sample.parsed
+            for w, emitted, incoming, valid in zip(
+                qc.wl,
+                qc.emitted_energy_signal,
+                qc.incoming_energy_signal,
+                qc.valid_mask,
+            ):
+                rows.append(
+                    {
+                        "group_key": result.group_key,
+                        "analysis_type": "quantum_conversion",
+                        "series_id": pf.series_id,
+                        "diode": pf.diode,
+                        "sample": pf.sample,
+                        "geometry": pf.geometry,
+                        "config": pf.config,
+                        "role": pf.role,
+                        "source_file": pf.path.name,
+                        "source_member": qc.sample.source_member,
+                        "blank_file": qc.blank.parsed.path.name,
+                        "integration_time": qc.sample.integration_time if qc.sample.integration_time is not None else np.nan,
+                        "blank_integration_time": qc.blank.integration_time if qc.blank.integration_time is not None else np.nan,
+                        "integration_time_norm_factor": qc.sample.integration_time_normalization_factor,
+                        "wavelength_nm": float(w),
+                        "signal_raw": np.nan,
+                        "signal_normalized": np.nan,
+                        "signal_net": np.nan,
+                        "signal_gated": np.nan,
+                        "transmittance": np.nan,
+                        "transmittance_smooth": np.nan,
+                        "absorbance": np.nan,
+                        "absorbance_smooth": np.nan,
+                        "scattering_net": float(emitted) if np.isfinite(emitted) else np.nan,
+                        "scattering_shape": float(incoming) if np.isfinite(incoming) else np.nan,
+                        "scattering_shape_smooth": np.nan,
+                        "valid": bool(valid),
+                    }
+                )
+
         for sc in result.scattering_results:
             pf = sc.sample.parsed
             for w, net, shape, shape_smooth, valid in zip(
@@ -232,6 +272,10 @@ def _quantity_unit(quantity: str) -> str:
         return "normalised_signal*nm"
     if quantity == "scattering_shape_auc":
         return "norm*nm"
+    if quantity == "quantum_conversion_efficiency":
+        return "energy_ratio"
+    if quantity in {"emitted_energy_auc", "incoming_energy_auc"}:
+        return "normalised_signal_energy_weighted*nm"
     return "nm"
 
 
@@ -253,6 +297,26 @@ def integrals_dataframe(results: list[GroupResult]) -> pd.DataFrame:
                         "role": pf.role,
                         "source_file": pf.path.name,
                         "blank_file": tr.blank.parsed.path.name,
+                        "quantity": quantity,
+                        "value": value,
+                        "unit": _quantity_unit(quantity),
+                    }
+                )
+        for qc in result.quantum_conversion_results:
+            pf = qc.sample.parsed
+            for quantity, value in qc.integrals.items():
+                rows.append(
+                    {
+                        "group_key": result.group_key,
+                        "analysis_type": "quantum_conversion",
+                        "series_id": pf.series_id,
+                        "diode": pf.diode,
+                        "sample": pf.sample,
+                        "geometry": pf.geometry,
+                        "config": pf.config,
+                        "role": pf.role,
+                        "source_file": pf.path.name,
+                        "blank_file": qc.blank.parsed.path.name,
                         "quantity": quantity,
                         "value": value,
                         "unit": _quantity_unit(quantity),
